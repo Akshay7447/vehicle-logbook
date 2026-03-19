@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>__USERNAME__ – __VEHICLE__ Logbook</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0a84ff">
+  <link rel="manifest" href="manifest.json">
+  <style>
+    body { font-family: Arial, sans-serif; padding:16px; background:#f4f4f4; }
+    .card { background:#fff; padding:16px; border-radius:8px; margin-bottom:16px; }
+    input, button, textarea { width:100%; padding:8px; margin-top:8px; box-sizing:border-box; font-size:16px; }
+    button { cursor:pointer; }
+    .hidden { display:none; }
+    .entry { background:#e9f5ff; padding:10px; border-radius:6px; margin-top:10px; }
+    .small { font-size:13px; color:#555; }
+    #updateBanner {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      background: #0a84ff;
+      color: #fff;
+      padding: 10px 16px;
+      display: none;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 14px;
+      z-index: 9999;
+    }
+    #updateBanner button {
+      width: auto;
+      margin-top: 0;
+      background: #fff;
+      color: #0a84ff;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Vehicle Logbook – __VEHICLE__</h2>
+
+<!-- LOGIN -->
+<div id="loginCard" class="card">
+  <h3>Login</h3>
+  <p>User: <b>__USERNAME__</b></p>
+  <label>PIN</label>
+  <input type="password" id="pinInput">
+  <button onclick="userLogin()">Login</button>
+</div>
+
+<!-- TRIP ENTRY -->
+<div id="logCard" class="card hidden">
+  <h3>New Trip</h3>
+
+  <label>Date</label>
+  <input type="date" id="dateInput">
+
+  <h4>GPS Start</h4>
+  <button onclick="captureStartGPS()">Capture Start GPS</button>
+  <p class="small" id="startGPSLabel">Not captured</p>
+
+  <h4>GPS End</h4>
+  <button onclick="captureEndGPS()">Capture End GPS</button>
+  <p class="small" id="endGPSLabel">Not captured</p>
+
+  <h4>Odometer (optional)</h4>
+  <label>Start Odometer (km)</label>
+  <input type="number" id="startOdo">
+  <label>End Odometer (km)</label>
+  <input type="number" id="endOdo">
+
+  <label>Notes / Purpose</label>
+  <textarea id="notes" rows="2"></textarea>
+
+  <button onclick="addTrip()">Add Trip</button>
+</div>
+
+<!-- TRIP LIST -->
+<div id="listCard" class="card hidden">
+  <h3>Trips</h3>
+  <div id="entries"></div>
+  <p class="small" id="totalKm"></p>
+
+  <button onclick="downloadCSV()">Download CSV</button>
+  <button onclick="emailCSV()">Email CSV</button>
+
+  <button style="margin-top:8px;background:#ddd;" onclick="userLogout()">Logout</button>
+</div>
+
+<script>
+// Injected values
+const USERNAME = "__USERNAME__";
+const VEHICLE  = "__VEHICLE__";
+const PIN_HASH = "__PIN_HASH__";
+const STORAGE_KEY = "logbookTrips_" + USERNAME;
+
+// SHA-256
+async function sha256(str) {
+  const data = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2,"0")).join("");
+}
+
+let trips = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+let startGPS = null;
+let endGPS = null;
+
+// LOGIN
+function userLogin() {
+  const pin = document.getElementById("pinInput").value.trim();
+  if (!pin) { alert("Enter PIN"); return; }
+  sha256(pin).then(hash => {
+    if (hash !== PIN_HASH) { alert("Invalid PIN"); return; }
+    document.getElementById("loginCard").classList.add("hidden");
+    document.getElementById("logCard").classList.remove("hidden");
+    document.getElementById("listCard").classList.remove("hidden");
+    initDate();
+    renderTrips();
+    suggestStartOdometer();
+  });
+}
+
+function suggestStartOdometer() {
+  if (trips.length === 0) {
+    // First ever entry → ask user
+    const first = prompt("Enter starting odometer (km):");
+    if (first && !isNaN(first)) {
+      document.getElementById("startOdo").value = parseFloat(first);
+    }
+    return;
+  }
+
+  // Use last trip's end odometer if available
+  const last = trips[trips.length - 1];
+  if (last.endO !== null && !isNaN(last.endO)) {
+    document.getElementById("startOdo").value = last.endO;
+  }
+}
+
+function userLogout() {
+  document.getElementById("pinInput").value = "";
+  document.getElementById("loginCard").classList.remove("hidden");
+  document.getElementById("logCard").classList.add("hidden");
+  document.getElementById("listCard").classList.add("hidden");
+}
+
+// DATE
+function initDate() {
+  document.getElementById("dateInput").value =
+    new Date().toISOString().split("T")[0];
+}
+
+// GPS CAPTURE
+function captureStartGPS() {
+  navigator.geolocation.getCurrentPosition(pos => {
+    startGPS = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    document.getElementById("startGPSLabel").textContent =
+      startGPS.lat.toFixed(5) + ", " + startGPS.lon.toFixed(5);
+  }, err => alert("GPS error: " + err.message));
+}
+
+function captureEndGPS() {
+  navigator.geolocation.getCurrentPosition(pos => {
+    endGPS = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    document.getElementById("endGPSLabel").textContent =
+      endGPS.lat.toFixed(5) + ", " + endGPS.lon.toFixed(5);
+  }, err => alert("GPS error: " + err.message));
+}
+
+// HAVERSINE DISTANCE
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2-lat1) * Math.PI/180;
+  const dLon = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(lat1*Math.PI/180) *
+            Math.cos(lat2*Math.PI/180) *
+            Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// ADD TRIP
+function addTrip() {
+  const date  = document.getElementById("dateInput").value;
+  const startO = parseFloat(document.getElementById("startOdo").value);
+  const endO   = parseFloat(document.getElementById("endOdo").value);
+  const notes  = document.getElementById("notes").value.trim();
+
+  if (!date) { alert("Enter date."); return; }
+
+  let km = 0;
+
+  if (startGPS && endGPS) {
+    km = haversine(startGPS.lat, startGPS.lon, endGPS.lat, endGPS.lon);
+  } else if (!isNaN(startO) && !isNaN(endO) && endO >= startO) {
+    km = endO - startO;
+  } else {
+    alert("Provide GPS start/end OR valid odometer values.");
+    return;
+  }
+
+  trips.push({
+    date,
+    startGPS,
+    endGPS,
+    startO: isNaN(startO) ? null : startO,
+    endO:   isNaN(endO)   ? null : endO,
+    km,
+    notes
+  });
+
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(trips));
+
+  // reset
+  startGPS = null;
+  endGPS = null;
+  document.getElementById("startGPSLabel").textContent = "Not captured";
+  document.getElementById("endGPSLabel").textContent = "Not captured";
+  document.getElementById("startOdo").value = "";
+  document.getElementById("endOdo").value = "";
+  document.getElementById("notes").value = "";
+
+  renderTrips();
+  suggestStartOdometer();
+}
+
+// RENDER TRIPS
+function renderTrips() {
+  const container = document.getElementById("entries");
+  container.innerHTML = "";
+  let total = 0;
+
+  trips.forEach((t, i) => {
+    total += t.km;
+    const div = document.createElement("div");
+    div.className = "entry";
+
+    div.innerHTML =
+      "<b>" + (i+1) + " – " + t.date + "</b><br>" +
+      (t.startGPS ? "Start GPS: " + t.startGPS.lat.toFixed(5) + ", " + t.startGPS.lon.toFixed(5) + "<br>" : "") +
+      (t.endGPS   ? "End GPS: "   + t.endGPS.lat.toFixed(5)   + ", " + t.endGPS.lon.toFixed(5)   + "<br>" : "") +
+      (t.startO !== null ? "Start Odo: " + t.startO + " km<br>" : "") +
+      (t.endO   !== null ? "End Odo: "   + t.endO   + " km<br>" : "") +
+      "Distance: " + t.km.toFixed(2) + " km<br>" +
+      (t.notes ? "Notes: " + escapeHtml(t.notes) : "");
+
+    container.appendChild(div);
+  });
+
+  document.getElementById("totalKm").textContent =
+    "Total distance: " + total.toFixed(2) + " km";
+}
+
+// CSV
+function downloadCSV() {
+  if (trips.length === 0) { alert("No trips."); return; }
+
+  const rows = [["User","Vehicle","Date","StartGPS","EndGPS","StartOdo","EndOdo","DistanceKm","Notes"]];
+
+  trips.forEach(t => {
+    rows.push([
+      USERNAME,
+      VEHICLE,
+      t.date,
+      t.startGPS ? t.startGPS.lat + "," + t.startGPS.lon : "",
+      t.endGPS   ? t.endGPS.lat   + "," + t.endGPS.lon   : "",
+      t.startO ?? "",
+      t.endO   ?? "",
+      t.km.toFixed(2),
+      t.notes || ""
+    ]);
+  });
+
+  const csv = rows.map(r => r.join(",")).join("\n");
+  const blob = new Blob([csv], { type:"text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "logbook_" + USERNAME + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
+// EMAIL CSV
+function emailCSV() {
+  if (trips.length === 0) { alert("No trips."); return; }
+
+  const rows = [["User","Vehicle","Date","StartGPS","EndGPS","StartOdo","EndOdo","DistanceKm","Notes"]];
+  trips.forEach(t => {
+    rows.push([
+      USERNAME,
+      VEHICLE,
+      t.date,
+      t.startGPS ? t.startGPS.lat + "," + t.startGPS.lon : "",
+      t.endGPS   ? t.endGPS.lat   + "," + t.endGPS.lon   : "",
+      t.startO ?? "",
+      t.endO   ?? "",
+      t.km.toFixed(2),
+      t.notes || ""
+    ]);
+  });
+
+  const csv = rows.map(r => r.join(",")).join("\n");
+  const subject = encodeURIComponent("Vehicle Logbook – " + USERNAME);
+  const body    = encodeURIComponent(csv);
+
+  window.location.href = "mailto:?subject=" + subject + "&body=" + body;
+}
+
+// ESCAPE HTML
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, m =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])
+  );
+}
+</script>
+<script>
+// --- PWA service worker registration + update banner for user page ---
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("service-worker.js").then(reg => {
+      reg.addEventListener("updatefound", () => {
+        const newWorker = reg.installing;
+        newWorker.addEventListener("statechange", () => {
+          if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+            showUpdateBanner();
+          }
+        });
+      });
+    });
+  });
+}
+
+function showUpdateBanner() {
+  const banner = document.getElementById("updateBanner");
+  if (!banner) return;
+  banner.style.display = "flex";
+}
+
+function reloadForUpdate() {
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ action: "skipWaiting" });
+  }
+  window.location.reload();
+}
+
+if (navigator.serviceWorker) {
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    window.location.reload();
+  });
+}
+</script>
+
+<div id="updateBanner">
+  <span>A new version is available.</span>
+  <button onclick="reloadForUpdate()">Update</button>
+</div>
+</body>
+</html>

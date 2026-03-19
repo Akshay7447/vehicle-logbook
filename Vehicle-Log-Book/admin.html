@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Vehicle Logbook – Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0a84ff">
+  <link rel="manifest" href="manifest.json">
+  <style>
+    body { font-family: Arial, sans-serif; padding: 16px; background:#f4f4f4; }
+    .card { background:#fff; padding:16px; border-radius:8px; margin-bottom:16px; }
+    input, button, select { width:100%; padding:8px; margin-top:8px; box-sizing:border-box; font-size:16px; }
+    button { cursor:pointer; }
+    .hidden { display:none; }
+    .small { font-size:13px; color:#555; }
+    #updateBanner {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      background: #0a84ff;
+      color: #fff;
+      padding: 10px 16px;
+      display: none;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 14px;
+      z-index: 9999;
+    }
+    #updateBanner button {
+      width: auto;
+      margin-top: 0;
+      background: #fff;
+      color: #0a84ff;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Vehicle Logbook – Admin</h2>
+
+<div id="loginCard" class="card">
+  <h3>Admin Login</h3>
+  <label>Admin PIN</label>
+  <input type="password" id="adminPin">
+  <button onclick="adminLogin()">Login</button>
+</div>
+
+<div id="adminCard" class="card hidden">
+  <h3>Manage Users</h3>
+
+  <h4>Create / Update User</h4>
+  <label>Username</label>
+  <input type="text" id="userName">
+  <label>User PIN</label>
+  <input type="password" id="userPin">
+  <label>Vehicle Rego</label>
+  <input type="text" id="userRego">
+  <button onclick="createOrUpdateUser()">Save User</button>
+
+  <h4>Existing Users</h4>
+  <select id="userSelect"></select>
+  <button onclick="deleteSelectedUser()">Delete Selected User</button>
+  <button onclick="generateSelectedUserFile()">Generate HTML for Selected User</button>
+
+  <p class="small">User data is stored in this browser only (localStorage).</p>
+
+  <button style="margin-top:16px;background:#ddd;" onclick="adminLogout()">Logout</button>
+</div>
+
+<script>
+const ADMIN_PIN = "87447"; // simple admin PIN
+
+// SHA-256 helper
+async function sha256(str) {
+  const data = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2,"0")).join("");
+}
+
+// users stored as { username: { pinHash, rego } }
+let users = JSON.parse(localStorage.getItem("logbookUsers") || "{}");
+
+function saveUsers() {
+  localStorage.setItem("logbookUsers", JSON.stringify(users));
+}
+
+function adminLogin() {
+  const pin = document.getElementById("adminPin").value.trim();
+  if (pin !== ADMIN_PIN) {
+    alert("Invalid admin PIN");
+    return;
+  }
+  document.getElementById("loginCard").classList.add("hidden");
+  document.getElementById("adminCard").classList.remove("hidden");
+  refreshUserSelect();
+}
+
+function adminLogout() {
+  document.getElementById("adminPin").value = "";
+  document.getElementById("loginCard").classList.remove("hidden");
+  document.getElementById("adminCard").classList.add("hidden");
+}
+
+async function createOrUpdateUser() {
+  const name = document.getElementById("userName").value.trim();
+  const pin  = document.getElementById("userPin").value.trim();
+  const rego = document.getElementById("userRego").value.trim();
+
+  if (!name || !pin || !rego) {
+    alert("Enter username, PIN and rego.");
+    return;
+  }
+  if (pin.length < 4 || pin.length > 6) {
+    alert("PIN must be 4–6 digits.");
+    return;
+  }
+
+  const pinHash = await sha256(pin);
+  users[name] = { pinHash: pinHash, rego: rego };
+  saveUsers();
+  refreshUserSelect();
+  alert("User saved.");
+}
+
+function refreshUserSelect() {
+  const sel = document.getElementById("userSelect");
+  sel.innerHTML = "";
+  const names = Object.keys(users).sort();
+  names.forEach(n => {
+    const opt = document.createElement("option");
+    opt.value = n;
+    opt.textContent = n + " (" + users[n].rego + ")";
+    sel.appendChild(opt);
+  });
+}
+
+function deleteSelectedUser() {
+  const sel = document.getElementById("userSelect");
+  const name = sel.value;
+  if (!name) { alert("No user selected."); return; }
+  if (!confirm("Delete user " + name + "?")) return;
+  delete users[name];
+  saveUsers();
+  refreshUserSelect();
+}
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("service-worker.js");
+}
+
+async function generateSelectedUserFile() {
+  const sel = document.getElementById("userSelect");
+  const name = sel.value;
+  if (!name) { alert("No user selected."); return; }
+
+  const data = users[name];
+  if (!data) { alert("User not found."); return; }
+
+  // load template
+  let templateText;
+  try {
+    const resp = await fetch("user-template.html");
+    templateText = await resp.text();
+  } catch (e) {
+    alert("Could not load user-template.html");
+    return;
+  }
+
+  // inject values
+  const pinHash = data.pinHash;
+  const rego = data.rego;
+
+  let out = templateText;
+  out = out.replace(/__USERNAME__/g, name);
+  out = out.replace(/__VEHICLE__/g, rego);
+  out = out.replace(/__PIN_HASH__/g, pinHash);
+
+  const fileName = name + "_" + rego + ".html";
+  const blob = new Blob([out], { type: "text/html" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+</script>
+<script>
+// --- PWA service worker registration + update banner ---
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("service-worker.js").then(reg => {
+      // Listen for updates
+      reg.addEventListener("updatefound", () => {
+        const newWorker = reg.installing;
+        newWorker.addEventListener("statechange", () => {
+          if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+            showUpdateBanner();
+          }
+        });
+      });
+    });
+  });
+}
+
+function showUpdateBanner() {
+  const banner = document.getElementById("updateBanner");
+  if (!banner) return;
+  banner.style.display = "flex";
+}
+
+function reloadForUpdate() {
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ action: "skipWaiting" });
+  }
+  // Fallback: hard reload
+  window.location.reload();
+}
+
+if (navigator.serviceWorker) {
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    // When a new SW takes control, reload to get fresh files
+    window.location.reload();
+  });
+}
+</script>
+
+<div id="updateBanner">
+  <span>A new version is available.</span>
+  <button onclick="reloadForUpdate()">Update</button>
+</div>
+</body>
+</html>
